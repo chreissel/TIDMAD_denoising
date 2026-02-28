@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.backends.legacy:build"
+
+[project]
+name = "tidmad-denoiser"
+version = "0.1.0"
+description = "Autoencoder + Attention denoiser for the TIDMAD dark-matter time-series dataset"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "CC-BY-4.0" }
+
+dependencies = [
+    "torch>=2.1",
+    "pytorch-lightning>=2.2",
+    "h5py>=3.10",
+    "numpy>=1.26",
+    "scipy>=1.12",
+    "einops>=0.7",
+    "pyyaml>=6.0",
+    "tqdm>=4.66",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4",
+    "pytest-cov",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["tidmad_denoiser*"]

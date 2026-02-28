@@ -1,0 +1,46 @@
+# configs/default.yaml
+# ─────────────────────────────────────────────────────────────────────────────
+# Default training configuration for the TIDMAD AttentionAutoencoder denoiser.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ── Data ─────────────────────────────────────────────────────────────────────
+data:
+  window_size: 4096          # samples per training window (must be power of 2)
+  stride: null               # null → non-overlapping (stride = window_size)
+  max_windows_per_file: 2000 # cap per HDF5 file to keep epoch manageable
+  batch_size: 32
+  num_workers: 4
+
+# ── Model ────────────────────────────────────────────────────────────────────
+model:
+  in_channels: 1
+  base_channels: 32          # doubled at each encoder level
+  n_levels: 4                # → 16× temporal compression in the bottleneck
+  n_attn_heads: 8
+  attn_dropout: 0.1
+  kernel_size: 7
+  n_res_blocks: 2
+
+# ── Training ─────────────────────────────────────────────────────────────────
+training:
+  max_epochs: 100
+  lr: 3.0e-4
+  weight_decay: 1.0e-4
+  warmup_epochs: 5
+  spectral_weight: 0.1       # weight of frequency-domain L1 loss
+  sample_rate: 1.0e7         # TIDMAD sample rate in Hz (10 MHz)
+  gradient_clip_val: 1.0
+  accumulate_grad_batches: 1
+
+# ── Callbacks ────────────────────────────────────────────────────────────────
+callbacks:
+  checkpoint_monitor: "val/tidmad_score"
+  checkpoint_mode: "max"
+  early_stopping_patience: 15
+  early_stopping_monitor: "val/tidmad_score"
+  early_stopping_mode: "max"
+
+# ── Logging ──────────────────────────────────────────────────────────────────
+logging:
+  project: "tidmad-denoiser"
+  log_every_n_steps: 50
