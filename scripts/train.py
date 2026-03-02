@@ -18,7 +18,6 @@ import pytorch_lightning as pl
 from pytorch_lightning.callbacks import (
     ModelCheckpoint,
     EarlyStopping,
-    LearningRateMonitor,
     RichProgressBar,
 )
 from pytorch_lightning.loggers import TensorBoardLogger
@@ -60,9 +59,6 @@ def main() -> None:
     model = DenoisingModule(
         model_cfg=cfg["model"],
         lr=cfg["training"]["lr"],
-        weight_decay=cfg["training"]["weight_decay"],
-        warmup_epochs=cfg["training"]["warmup_epochs"],
-        spectral_weight=cfg["training"]["spectral_weight"],
         sample_rate=cfg["training"]["sample_rate"],
     )
 
@@ -88,7 +84,6 @@ def main() -> None:
             patience=cb_cfg["early_stopping_patience"],
             verbose=True,
         ),
-        LearningRateMonitor(logging_interval="epoch"),
         RichProgressBar(),
     ]
 

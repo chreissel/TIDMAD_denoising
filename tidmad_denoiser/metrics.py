@@ -7,8 +7,8 @@ Implemented metrics
 2. SNR          : Signal-to-Noise Ratio (dB)
 3. PSNR         : Peak Signal-to-Noise Ratio (dB)
 4. Pearson r    : Linear correlation between output and ground truth
-5. TIDMADScore  : Official denoising score based on PSD improvement
-                  (approximation — mirrors the spirit of benchmark.py)
+5. TIDMADScore  : Official benchmark score from jessicafry/TIDMAD benchmark.py
+                  log₅.₂₇(mean(normalised_snr_sg × snr_squid))
 
 All functions operate on 1-D or 2-D torch Tensors:
   - 1-D: a single time series window
@@ -95,32 +95,55 @@ def pearson_r(y_pred: Tensor, y_true: Tensor) -> Tensor:
 
 
 # --------------------------------------------------------------------------- #
-#  TIDMAD-inspired denoising score                                             #
+#  TIDMAD benchmark denoising score (matching jessicafry/TIDMAD benchmark.py) #
 # --------------------------------------------------------------------------- #
 
-def _power_spectral_density(x: Tensor, sample_rate: float = 1e7) -> tuple[Tensor, Tensor]:
+def _get_psd(x: Tensor, sample_rate: float) -> Tensor:
     """
-    Compute the one-sided PSD using Welch's method (simple FFT version).
+    One-sided PSD for each row of x (B, T) → (B, T//2).
 
-    Returns
-    -------
-    freqs : (N//2,)
-    psd   : (B, N//2)  or (N//2,) if x is 1-D
+    Matches the reference:  dt/N * |rfft(ts)|^2  (no windowing, DC dropped).
     """
-    if x.dim() == 1:
-        x = x.unsqueeze(0)
     N = x.shape[-1]
-    # Apply Hann window to reduce spectral leakage
-    window = torch.hann_window(N, device=x.device, dtype=x.dtype)
-    x_w = x * window
+    dt = 1.0 / sample_rate
+    fft = torch.fft.rfft(x, dim=-1)
+    psd = (fft.abs() ** 2) * (dt / N)
+    # Drop DC bin (index 0) — reference uses freq_array starting at the first non-DC bin
+    return psd[:, 1:]
 
-    fft = torch.fft.rfft(x_w, dim=-1)
-    psd = (fft.abs() ** 2) / (sample_rate * N)
-    # One-sided: double all bins except DC and Nyquist
-    psd[..., 1:-1] *= 2.0
 
-    freqs = torch.fft.rfftfreq(N, d=1.0 / sample_rate, device=x.device)
-    return freqs, psd
+def _find_peak(pwr: Tensor) -> int:
+    """
+    Replicate benchmark.py findPeak:
+      peakdiff = pwr[1:-1] - pwr[:-2] - pwr[2:]
+      peakIndex = argmax(peakdiff) + 1
+    Returns the integer index into `pwr`.
+    """
+    peakdiff = pwr[1:-1] - pwr[:-2] - pwr[2:]
+    return int(peakdiff.argmax().item()) + 1
+
+
+def _get_snr(pwr: Tensor, center_id: int) -> Tensor:
+    """
+    Replicate benchmark.py getSNR:
+      sig_range   = 1
+      noise_range = 50
+      signal = sum(pwr[center - 1 : center + 2])
+      noise  = sum(pwr[center - 50 : center + 51]) - signal
+      SNR    = signal / noise
+    """
+    sig_range = 1
+    noise_range = 50
+    n = len(pwr)
+
+    s_lo = max(0, center_id - sig_range)
+    s_hi = min(n, center_id + sig_range + 1)
+    n_lo = max(0, center_id - noise_range)
+    n_hi = min(n, center_id + noise_range + 1)
+
+    signal = pwr[s_lo:s_hi].sum()
+    noise = (pwr[n_lo:n_hi].sum() - signal).clamp(min=1e-30)
+    return signal / noise
 
 
 def tidmad_denoising_score(
@@ -128,43 +151,53 @@ def tidmad_denoising_score(
     y_true: Tensor,
     y_noisy: Tensor,
     sample_rate: float = 1e7,
-    f_min: float = 0.0,
-    f_max: float = 2e6,
 ) -> Tensor:
     """
-    TIDMAD-inspired denoising score.
+    TIDMAD benchmark denoising score matching jessicafry/TIDMAD benchmark.py.
 
-    Measures how much the model improves the PSD residual compared to the
-    raw (un-denoised) signal, within a frequency band [f_min, f_max].
-
-    Score = mean_freq( PSD(y_noisy - y_true) / PSD(y_pred - y_true) )
-            (higher is better; 1.0 means no improvement)
+    Algorithm (per batch of windows)
+    ---------------------------------
+    1. Compute one-sided PSD of y_true  (signal generator, channel0002)
+       and y_pred (denoised SQUID output).
+    2. Per window: find peak frequency in y_true PSD (findPeak).
+    3. Per window: compute SNR of y_true at that peak  → snr_sg.
+    4. Per window: compute SNR of y_pred at same peak  → snr_squid.
+    5. Normalise: snr_sg /= max(snr_sg)  (across the batch).
+    6. score = mean(snr_sg_norm × snr_squid) + 1e-10
+    7. Return log₅.₂₇(score).
 
     Parameters
     ----------
-    y_pred   : denoised model output (B, 1, T) or (B, T)
-    y_true   : injected ground-truth signal (B, 1, T) or (B, T)
-    y_noisy  : raw noisy input signal (B, 1, T) or (B, T)
+    y_pred   : denoised model output  (B, 1, T) or (B, T)
+    y_true   : injected ground-truth  (B, 1, T) or (B, T)  [channel0002]
+    y_noisy  : raw noisy input        (B, 1, T) or (B, T)  [unused in score,
+               kept for API compatibility]
     sample_rate : Hz (TIDMAD default 10 MHz)
-    f_min, f_max : frequency band for score evaluation (Hz)
     """
     y_pred, y_true = _flatten(y_pred, y_true)
-    y_noisy, _ = _flatten(y_noisy, y_true)
+    B = y_true.shape[0]
 
-    residual_pred = y_pred - y_true
-    residual_noisy = y_noisy - y_true
+    psd_sg    = _get_psd(y_true, sample_rate)   # (B, F)
+    psd_squid = _get_psd(y_pred, sample_rate)   # (B, F)
 
-    freqs, psd_pred = _power_spectral_density(residual_pred, sample_rate)
-    _, psd_noisy = _power_spectral_density(residual_noisy, sample_rate)
+    snr_sg_vals    = []
+    snr_squid_vals = []
 
-    # Select frequency band
-    mask = (freqs >= f_min) & (freqs <= f_max)
-    psd_pred_band = psd_pred[..., mask].clamp(min=1e-30)
-    psd_noisy_band = psd_noisy[..., mask].clamp(min=1e-30)
+    for b in range(B):
+        center = _find_peak(psd_sg[b])
+        snr_sg_vals.append(_get_snr(psd_sg[b], center))
+        snr_squid_vals.append(_get_snr(psd_squid[b], center))
 
-    ratio = psd_noisy_band / psd_pred_band          # > 1 means improvement
-    score = ratio.mean()                             # average over freq & batch
-    return score
+    snr_sg    = torch.stack(snr_sg_vals)     # (B,)
+    snr_squid = torch.stack(snr_squid_vals)  # (B,)
+
+    # Normalise sg SNR by batch max — matching benchmark.py line:
+    #   snr_sg = snr_sg / np.amax(snr_sg)
+    snr_sg_norm = snr_sg / snr_sg.max().clamp(min=1e-30)
+
+    # score = mean(snr_sg_norm * snr_squid) + 1e-10, then log base 5.27
+    score = (snr_sg_norm * snr_squid).mean() + 1e-10
+    return torch.log(score) / math.log(5.27)
 
 
 # --------------------------------------------------------------------------- #
