@@ -1,13 +1,16 @@
 """
 TIDMAD Dataset & PyTorch Lightning DataModule.
 
-The TIDMAD HDF5 files contain:
-  - channel0001 : noisy SQUID readout  (model INPUT)
-  - channel0002 : injected fake signal  (model TARGET / ground truth)
+Data loading follows the same pattern as the official TIDMAD repository:
+  - The HDF5 file is opened once per worker and kept open.
+  - Each __getitem__ call reads exactly one segment directly from disk
+    using an integer slice — no full file is ever loaded into RAM.
+  - Raw int8 values are cast to float32 on the fly.
 
-Both channels are float32 time-series sampled at 10 MHz.
-We slice them into non-overlapping windows of `window_size` samples
-and normalise each window independently (zero-mean, unit-std).
+HDF5 structure:
+    timeseries/
+        channel0001/timeseries   ← noisy SQUID readout  (input)
+        channel0002/timeseries   ← injected signal      (target)
 """
 
 from __future__ import annotations
@@ -24,20 +27,12 @@ import pytorch_lightning as pl
 
 
 # --------------------------------------------------------------------------- #
-#  Low-level helpers                                                            #
+#  Constants                                                                   #
 # --------------------------------------------------------------------------- #
 
-MAX_SAMPLES = 2_000_000_000  # recommended upper limit from TIDMAD README
-
-
-def _load_channels(path: str) -> Tuple[np.ndarray, np.ndarray]:
-    """Return (ch1, ch2) as float32 arrays, truncated to MAX_SAMPLES."""
-    with h5py.File(path, "r") as f:
-        ch1 = f["channel0001"][: MAX_SAMPLES].astype(np.float32)
-        ch2 = f["channel0002"][: MAX_SAMPLES].astype(np.float32)
-    # Ensure equal length
-    n = min(len(ch1), len(ch2))
-    return ch1[:n], ch2[:n]
+MAX_SAMPLES  = 2_000_000_000          # recommended cap from TIDMAD README
+CH1_PATH     = "timeseries/channel0001/timeseries"
+CH2_PATH     = "timeseries/channel0002/timeseries"
 
 
 # --------------------------------------------------------------------------- #
@@ -46,45 +41,57 @@ def _load_channels(path: str) -> Tuple[np.ndarray, np.ndarray]:
 
 class TIDMADWindowDataset(Dataset):
     """
-    Slices a single TIDMAD training/validation HDF5 file into fixed-length
-    non-overlapping windows.
+    Reads fixed-length segments lazily from a single TIDMAD HDF5 file.
+
+    The HDF5 file is opened once (per worker) and individual windows are
+    sliced on demand — identical to the official TIDMAD train.py approach.
+    No full channel is ever loaded into RAM.
 
     Parameters
     ----------
     path : str
-        Path to an ``abra_training_*.h5`` or ``abra_validation_*.h5`` file.
+        Path to an abra_training_*.h5 or abra_validation_*.h5 file.
     window_size : int
-        Number of time-steps per sample (must be a power of 2 for the model).
+        Number of samples per segment (segment_size in the original code).
     stride : int | None
-        Stride between consecutive windows.  Defaults to ``window_size``
-        (non-overlapping).  Set smaller for data augmentation.
+        Step between segment start indices. Defaults to window_size
+        (non-overlapping). Use window_size // 2 for 50 % overlap.
     max_windows : int | None
-        Cap on the number of windows drawn from this file.  Useful to keep
-        epoch length manageable when files are very large.
+        Cap on total windows drawn from this file.
     """
 
     def __init__(
         self,
         path: str,
-        window_size: int = 4096,
+        window_size: int = 40_000,
         stride: Optional[int] = None,
         max_windows: Optional[int] = None,
     ) -> None:
         super().__init__()
-        self.path = path
+        self.path        = path
         self.window_size = window_size
-        self.stride = stride if stride is not None else window_size
+        self.stride      = stride if stride is not None else window_size
 
-        ch1, ch2 = _load_channels(path)
-        self.ch1 = torch.from_numpy(ch1)
-        self.ch2 = torch.from_numpy(ch2)
+        # Open file briefly just to read the length — then close again.
+        with h5py.File(self.path, "r") as f:
+            n1 = f[CH1_PATH].shape[0]
+            n2 = f[CH2_PATH].shape[0]
 
-        n = len(self.ch1)
-        # Compute starting indices of all valid windows
+        n = min(n1, n2, MAX_SAMPLES)
         starts = list(range(0, n - window_size + 1, self.stride))
         if max_windows is not None:
             starts = starts[:max_windows]
         self.starts = starts
+
+        # File handle — opened lazily in _get_file() per worker
+        self._file: Optional[h5py.File] = None
+
+    # h5py File objects are not picklable, so we open them lazily
+    # inside each DataLoader worker after forking.
+    def _get_file(self) -> h5py.File:
+        if self._file is None:
+            self._file = h5py.File(self.path, "r")
+        return self._file
 
     def __len__(self) -> int:
         return len(self.starts)
@@ -92,19 +99,29 @@ class TIDMADWindowDataset(Dataset):
     def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor]:
         s = self.starts[idx]
         e = s + self.window_size
+        f = self._get_file()
 
-        x = self.ch1[s:e].clone()   # noisy input
-        y = self.ch2[s:e].clone()   # clean target
+        # Read one segment from disk — identical to the official TIDMAD code:
+        #   np.array(ABRAfile['timeseries']['channel0001']['timeseries']) + 128
+        # We cast to float32 directly instead of keeping uint8.
+        x = f[CH1_PATH][s:e].astype(np.float32)   # noisy SQUID
+        y = f[CH2_PATH][s:e].astype(np.float32)   # injected signal
 
-        # Per-window standardisation (zero-mean, unit-std)
-        x_mean, x_std = x.mean(), x.std().clamp(min=1e-8)
-        y_mean, y_std = y.mean(), y.std().clamp(min=1e-8)
+        # Per-window normalisation (zero-mean, unit-std)
+        x = (x - x.mean()) / (x.std() + 1e-8)
+        y = (y - y.mean()) / (y.std() + 1e-8)
 
-        x = (x - x_mean) / x_std
-        y = (y - y_mean) / y_std
+        return (
+            torch.from_numpy(x).unsqueeze(0),   # (1, window_size)
+            torch.from_numpy(y).unsqueeze(0),
+        )
 
-        # Shape: (1, window_size) – single-channel 1-D signal
-        return x.unsqueeze(0), y.unsqueeze(0)
+    def __del__(self) -> None:
+        if self._file is not None:
+            try:
+                self._file.close()
+            except Exception:
+                pass
 
 
 # --------------------------------------------------------------------------- #
@@ -115,25 +132,17 @@ class TIDMADDataModule(pl.LightningDataModule):
     """
     PyTorch Lightning DataModule for TIDMAD.
 
-    Expects the following directory layout (produced by ``download_data.py``):
-
-        data_dir/
-            abra_training_0000.h5
-            abra_training_0001.h5
-            ...
-            abra_validation_0000.h5
-            ...
-
     Parameters
     ----------
     data_dir : str
-        Root directory containing all HDF5 files.
+        Directory containing abra_training_*.h5 and abra_validation_*.h5 files.
     window_size : int
-        Window length fed to the model.
+        Segment length fed to the model (default 40 000 = 4 ms at 10 MS/s,
+        matching FC-Net in the original paper).
     stride : int | None
-        Stride for training windows (None → non-overlapping).
+        Stride between windows. None -> non-overlapping.
     max_windows_per_file : int | None
-        Limit windows per file to keep epoch length tractable.
+        Cap per file to keep epoch length tractable.
     batch_size : int
     num_workers : int
     """
@@ -141,23 +150,21 @@ class TIDMADDataModule(pl.LightningDataModule):
     def __init__(
         self,
         data_dir: str,
-        window_size: int = 4096,
+        window_size: int = 40_000,
         stride: Optional[int] = None,
         max_windows_per_file: Optional[int] = 2000,
         batch_size: int = 32,
         num_workers: int = 4,
     ) -> None:
         super().__init__()
-        self.data_dir = data_dir
-        self.window_size = window_size
-        self.stride = stride
+        self.data_dir             = data_dir
+        self.window_size          = window_size
+        self.stride               = stride
         self.max_windows_per_file = max_windows_per_file
-        self.batch_size = batch_size
-        self.num_workers = num_workers
-
+        self.batch_size           = batch_size
+        self.num_workers          = num_workers
         self.save_hyperparameters()
 
-    # ------------------------------------------------------------------ #
     def _glob(self, pattern: str) -> List[str]:
         files = sorted(glob.glob(os.path.join(self.data_dir, pattern)))
         if not files:
@@ -167,52 +174,31 @@ class TIDMADDataModule(pl.LightningDataModule):
             )
         return files
 
-    # ------------------------------------------------------------------ #
+    def _make_dataset(self, files: List[str], stride: Optional[int]) -> ConcatDataset:
+        return ConcatDataset([
+            TIDMADWindowDataset(
+                f,
+                window_size=self.window_size,
+                stride=stride,
+                max_windows=self.max_windows_per_file,
+            )
+            for f in files
+        ])
+
     def setup(self, stage: Optional[str] = None) -> None:
         if stage in ("fit", None):
-            train_files = self._glob("abra_training_*.h5")
-            self.train_dataset = ConcatDataset(
-                [
-                    TIDMADWindowDataset(
-                        f,
-                        window_size=self.window_size,
-                        stride=self.stride,
-                        max_windows=self.max_windows_per_file,
-                    )
-                    for f in train_files
-                ]
+            self.train_dataset = self._make_dataset(
+                self._glob("abra_training_*.h5"), stride=self.stride
             )
-
         if stage in ("fit", "validate", None):
-            val_files = self._glob("abra_validation_*.h5")
-            self.val_dataset = ConcatDataset(
-                [
-                    TIDMADWindowDataset(
-                        f,
-                        window_size=self.window_size,
-                        stride=None,  # non-overlapping for validation
-                        max_windows=self.max_windows_per_file,
-                    )
-                    for f in val_files
-                ]
+            self.val_dataset = self._make_dataset(
+                self._glob("abra_validation_*.h5"), stride=None
             )
-
         if stage in ("test", None):
-            # Re-use validation files for testing (benchmark scoring)
-            val_files = self._glob("abra_validation_*.h5")
-            self.test_dataset = ConcatDataset(
-                [
-                    TIDMADWindowDataset(
-                        f,
-                        window_size=self.window_size,
-                        stride=None,
-                        max_windows=self.max_windows_per_file,
-                    )
-                    for f in val_files
-                ]
+            self.test_dataset = self._make_dataset(
+                self._glob("abra_validation_*.h5"), stride=None
             )
 
-    # ------------------------------------------------------------------ #
     def train_dataloader(self) -> DataLoader:
         return DataLoader(
             self.train_dataset,

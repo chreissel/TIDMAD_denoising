@@ -37,8 +37,8 @@ def spectral_loss(y_pred: torch.Tensor, y_true: torch.Tensor) -> torch.Tensor:
         y_pred = y_pred.squeeze(1)
         y_true = y_true.squeeze(1)
 
-    fft_pred = torch.fft.rfft(y_pred, dim=-1)
-    fft_true = torch.fft.rfft(y_true, dim=-1)
+    fft_pred = torch.fft.rfft(y_pred.float(), dim=-1)
+    fft_true = torch.fft.rfft(y_true.float(), dim=-1)
     return F.l1_loss(fft_pred.abs(), fft_true.abs())
 
 
