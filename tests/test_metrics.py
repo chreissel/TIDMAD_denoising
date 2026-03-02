@@ -98,35 +98,24 @@ def test_pearson_range():
 
 
 # --------------------------------------------------------------------------- #
-#  TIDMAD denoising score                                                     #
+#  TIDMAD denoising score (benchmark.py formula)                              #
 # --------------------------------------------------------------------------- #
 
-def test_tidmad_score_perfect_denoising():
-    """
-    If y_pred == y_true, the residual is zero → score → ∞.
-    We check that the score is very large.
-    """
-    y_true = torch.randn(2, 1, 4096) * 0.01
-    y_noisy = y_true + torch.randn_like(y_true)
-    y_pred = y_true.clone()   # perfect denoising
+def test_tidmad_score_finite():
+    """Score must always be a finite number."""
+    torch.manual_seed(0)
+    y_true = torch.randn(4, 1, 4096)
+    y_noisy = y_true + torch.randn(4, 1, 4096)
+    y_pred = y_true + 0.1 * torch.randn(4, 1, 4096)
 
     score = tidmad_denoising_score(y_pred, y_true, y_noisy)
-    assert score.item() > 1e4, "Perfect denoising should give a very large score"
-
-
-def test_tidmad_score_no_denoising():
-    """If y_pred == y_noisy, the score should be close to 1 (no improvement)."""
-    y_true = torch.zeros(2, 1, 4096)
-    y_noisy = torch.randn(2, 1, 4096)
-    y_pred = y_noisy.clone()  # no denoising
-
-    score = tidmad_denoising_score(y_pred, y_true, y_noisy)
-    assert score.item() == pytest.approx(1.0, rel=0.2)
+    assert torch.isfinite(score), f"Score is not finite: {score}"
 
 
 def test_tidmad_score_better_than_no_denoising():
-    """Denoising should score higher than no denoising."""
+    """A cleaner prediction should outscore the raw noisy input."""
     torch.manual_seed(42)
+    # Clear sinusoidal signal so findPeak identifies a sharp spectral peak
     signal = torch.sin(torch.linspace(0, 20 * math.pi, 4096)).unsqueeze(0).unsqueeze(0)
     noise = torch.randn(1, 1, 4096)
     y_true = signal
@@ -138,7 +127,24 @@ def test_tidmad_score_better_than_no_denoising():
     score_good = tidmad_denoising_score(y_pred_good, y_true, y_noisy)
     score_bad = tidmad_denoising_score(y_pred_bad, y_true, y_noisy)
 
-    assert score_good.item() > score_bad.item()
+    assert score_good.item() > score_bad.item(), (
+        f"Good prediction score ({score_good:.4f}) should exceed "
+        f"no-denoising score ({score_bad:.4f})"
+    )
+
+
+def test_tidmad_score_perfect_better_than_noisy():
+    """Perfect reconstruction (y_pred == y_true) should score above noisy input."""
+    torch.manual_seed(7)
+    signal = torch.sin(torch.linspace(0, 30 * math.pi, 4096)).unsqueeze(0).unsqueeze(0)
+    noise = torch.randn(1, 1, 4096)
+    y_true = signal
+    y_noisy = signal + noise
+
+    score_perfect = tidmad_denoising_score(y_true.clone(), y_true, y_noisy)
+    score_noisy = tidmad_denoising_score(y_noisy.clone(), y_true, y_noisy)
+
+    assert score_perfect.item() > score_noisy.item()
 
 
 # --------------------------------------------------------------------------- #
