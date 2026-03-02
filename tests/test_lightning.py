@@ -51,8 +51,6 @@ def tiny_model():
             "n_res_blocks": 1,
         },
         lr=1e-3,
-        warmup_epochs=1,
-        spectral_weight=0.1,
     )
 
 
@@ -126,24 +124,21 @@ class TestDenoisingModule:
 
     def test_loss_decreases_overfit(self, tmp_path):
         """Overfit on a tiny batch to confirm the optimiser works."""
-        # Tiny model + tiny fixed batch
         model = DenoisingModule(
             model_cfg={"base_channels": 8, "n_levels": 2, "n_attn_heads": 2, "n_res_blocks": 1},
             lr=1e-3,
-            warmup_epochs=0,
-            spectral_weight=0.0,
         )
 
         x = torch.randn(4, 1, 256)
         y = torch.randn(4, 1, 256)
 
-        opt = model.configure_optimizers()["optimizer"]
+        opt = model.configure_optimizers()
 
         losses = []
         for _ in range(20):
             opt.zero_grad()
             y_hat = model(x)
-            loss = torch.nn.functional.mse_loss(y_hat, y)
+            loss = torch.nn.functional.smooth_l1_loss(y_hat, y)
             loss.backward()
             opt.step()
             losses.append(loss.item())
