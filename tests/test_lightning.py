@@ -14,7 +14,7 @@ import h5py
 import numpy as np
 import pytest
 import torch
-from tidmad_denoiser._compat import pl
+import pytorch_lightning as pl
 
 from tidmad_denoiser.lightning import DenoisingModule
 from tidmad_denoiser.data import TIDMADDataModule

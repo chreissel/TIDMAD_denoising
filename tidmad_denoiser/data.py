@@ -20,7 +20,7 @@ import h5py
 import numpy as np
 import torch
 from torch.utils.data import Dataset, DataLoader, ConcatDataset
-from tidmad_denoiser._compat import pl
+import pytorch_lightning as pl
 
 
 # --------------------------------------------------------------------------- #
