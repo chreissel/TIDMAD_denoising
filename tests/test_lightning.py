@@ -132,7 +132,9 @@ class TestDenoisingModule:
         x = torch.randn(4, 1, 256)
         y = torch.randn(4, 1, 256)
 
-        opt = model.configure_optimizers()
+        opt_cfg = model.configure_optimizers()
+        # configure_optimizers returns a dict with optimizer + scheduler
+        opt = opt_cfg["optimizer"] if isinstance(opt_cfg, dict) else opt_cfg
 
         losses = []
         for _ in range(20):

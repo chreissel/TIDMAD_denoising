@@ -1,10 +1,9 @@
 """
 PyTorch Lightning Module for the TIDMAD denoising autoencoder.
 
-Training aligned with the jessicafry/TIDMAD reference repository:
-  - Loss        : SmoothL1Loss (Huber loss), matching the FCNet/AE baseline
+  - Loss        : SmoothL1Loss + spectral_weight × spectral SmoothL1Loss
   - Optimizer   : Adam(lr=5e-4), no weight decay
-  - LR schedule : None (matches reference — no scheduler used)
+  - LR schedule : CosineAnnealingLR (decays to 1e-6 over max_epochs)
   - Metrics     : benchmark.py SNR-based score (log₅.₂₇ of normalised SNR product)
 """
 
@@ -38,6 +37,7 @@ class DenoisingModule(pl.LightningModule):
         model_cfg: Optional[Dict[str, Any]] = None,
         lr: float = 5e-4,
         sample_rate: float = 1e7,
+        spectral_weight: float = 0.3,
     ) -> None:
         super().__init__()
         self.save_hyperparameters()
@@ -47,6 +47,7 @@ class DenoisingModule(pl.LightningModule):
 
         self.lr = lr
         self.sample_rate = sample_rate
+        self.spectral_weight = spectral_weight
 
     # ------------------------------------------------------------------ #
     #  Forward                                                             #
@@ -65,8 +66,14 @@ class DenoisingModule(pl.LightningModule):
         x, y = batch          # x: noisy input, y: clean target
         y_hat = self(x)       # denoised prediction
 
-        # SmoothL1Loss (Huber loss) — matches reference repo's FCNet/AE loss
+        # Time-domain Huber loss
         loss = F.smooth_l1_loss(y_hat, y)
+
+        # Spectral loss: penalise wrong frequency content directly.
+        # This aligns training with the frequency-domain TIDMAD metric.
+        fft_hat = torch.fft.rfft(y_hat.float(), dim=-1).abs()
+        fft_y   = torch.fft.rfft(y.float(),   dim=-1).abs()
+        loss = loss + self.spectral_weight * F.smooth_l1_loss(fft_hat, fft_y)
 
         # All metrics (logged but not back-propagated)
         metrics = compute_all_metrics(
@@ -105,5 +112,14 @@ class DenoisingModule(pl.LightningModule):
     # ------------------------------------------------------------------ #
 
     def configure_optimizers(self):
-        # Plain Adam, lr=5e-4 — matching reference repo (no weight decay, no scheduler)
-        return torch.optim.Adam(self.parameters(), lr=self.lr)
+        optimizer = torch.optim.Adam(self.parameters(), lr=self.lr)
+        try:
+            max_epochs = self.trainer.max_epochs
+        except RuntimeError:
+            max_epochs = 100
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer,
+            T_max=max_epochs,
+            eta_min=1e-6,
+        )
+        return {"optimizer": optimizer, "lr_scheduler": {"scheduler": scheduler, "interval": "epoch"}}

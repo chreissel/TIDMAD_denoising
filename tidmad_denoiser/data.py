@@ -1,16 +1,19 @@
 """
 TIDMAD Dataset & PyTorch Lightning DataModule.
 
+The TIDMAD HDF5 files contain:
+  - channel0001 : noisy SQUID readout  (model INPUT)
+  - channel0002 : injected fake signal  (model TARGET / ground truth)
+
+Raw values are signed ADC integers in [-128, 127].  Following the reference
+(jessicafry/TIDMAD train.py), we add 128 to shift to the unsigned range
+[0, 255] and apply no further per-window normalisation.
+
 Data loading follows the same pattern as the official TIDMAD repository:
   - The HDF5 file is opened once per worker and kept open.
   - Each __getitem__ call reads exactly one segment directly from disk
     using an integer slice — no full file is ever loaded into RAM.
   - Raw int8 values are cast to float32 on the fly.
-
-HDF5 structure:
-    timeseries/
-        channel0001/timeseries   ← noisy SQUID readout  (input)
-        channel0002/timeseries   ← injected signal      (target)
 """
 
 from __future__ import annotations
@@ -30,9 +33,28 @@ import pytorch_lightning as pl
 #  Constants                                                                   #
 # --------------------------------------------------------------------------- #
 
-MAX_SAMPLES  = 2_000_000_000          # recommended cap from TIDMAD README
-CH1_PATH     = "timeseries/channel0001/timeseries"
-CH2_PATH     = "timeseries/channel0002/timeseries"
+MAX_SAMPLES = 2_000_000_000  # recommended upper limit from TIDMAD README
+
+
+def _load_channels(path: str) -> Tuple[np.ndarray, np.ndarray]:
+    """Return (ch1, ch2) as float32 arrays in [0, 255], truncated to MAX_SAMPLES.
+
+    Follows the reference (jessicafry/TIDMAD train.py / inference.py):
+      - Primary path: timeseries/channel000X/timeseries  (nested, reference format)
+      - Fallback path: channel000X                       (flat, for local test files)
+      - Both channels shifted by +128: signed ADC [-128, 127] → unsigned [0, 255]
+    """
+    with h5py.File(path, "r") as f:
+        try:
+            ch1 = f["timeseries"]["channel0001"]["timeseries"][: MAX_SAMPLES].astype(np.float32)
+            ch2 = f["timeseries"]["channel0002"]["timeseries"][: MAX_SAMPLES].astype(np.float32)
+        except KeyError:
+            ch1 = f["channel0001"][: MAX_SAMPLES].astype(np.float32)
+            ch2 = f["channel0002"][: MAX_SAMPLES].astype(np.float32)
+    ch1 += 128.0   # shift signed ADC → unsigned [0, 255], matching reference
+    ch2 += 128.0
+    n = min(len(ch1), len(ch2))
+    return ch1[:n], ch2[:n]
 
 
 # --------------------------------------------------------------------------- #
@@ -101,20 +123,15 @@ class TIDMADWindowDataset(Dataset):
         e = s + self.window_size
         f = self._get_file()
 
-        # Read one segment from disk — identical to the official TIDMAD code:
-        #   np.array(ABRAfile['timeseries']['channel0001']['timeseries']) + 128
-        # We cast to float32 directly instead of keeping uint8.
-        x = f[CH1_PATH][s:e].astype(np.float32)   # noisy SQUID
-        y = f[CH2_PATH][s:e].astype(np.float32)   # injected signal
+        x = self.ch1[s:e].clone()   # noisy input  (values in [0, 255])
+        y = self.ch2[s:e].clone()   # clean target (values in [0, 255])
 
-        # Per-window normalisation (zero-mean, unit-std)
-        x = (x - x.mean()) / (x.std() + 1e-8)
-        y = (y - y.mean()) / (y.std() + 1e-8)
-
-        return (
-            torch.from_numpy(x).unsqueeze(0),   # (1, window_size)
-            torch.from_numpy(y).unsqueeze(0),
-        )
+        # No per-window normalisation — following the reference (jessicafry/TIDMAD
+        # train.py) which uses raw ADC values shifted to [0, 255] without any
+        # further centering or scaling.
+        
+        # Shape: (1, window_size) – single-channel 1-D signal
+        return x.unsqueeze(0), y.unsqueeze(0)
 
     def __del__(self) -> None:
         if self._file is not None:
