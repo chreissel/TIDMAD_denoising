@@ -5,9 +5,9 @@ The TIDMAD HDF5 files contain:
   - channel0001 : noisy SQUID readout  (model INPUT)
   - channel0002 : injected fake signal  (model TARGET / ground truth)
 
-Both channels are float32 time-series sampled at 10 MHz.
-We slice them into non-overlapping windows of `window_size` samples
-and normalise each window independently (zero-mean, unit-std).
+Raw values are signed ADC integers in [-128, 127].  Following the reference
+(jessicafry/TIDMAD train.py), we add 128 to shift to the unsigned range
+[0, 255] and apply no further per-window normalisation.
 """
 
 from __future__ import annotations
@@ -31,11 +31,22 @@ MAX_SAMPLES = 2_000_000_000  # recommended upper limit from TIDMAD README
 
 
 def _load_channels(path: str) -> Tuple[np.ndarray, np.ndarray]:
-    """Return (ch1, ch2) as float32 arrays, truncated to MAX_SAMPLES."""
+    """Return (ch1, ch2) as float32 arrays in [0, 255], truncated to MAX_SAMPLES.
+
+    Follows the reference (jessicafry/TIDMAD train.py / inference.py):
+      - Primary path: timeseries/channel000X/timeseries  (nested, reference format)
+      - Fallback path: channel000X                       (flat, for local test files)
+      - Both channels shifted by +128: signed ADC [-128, 127] → unsigned [0, 255]
+    """
     with h5py.File(path, "r") as f:
-        ch1 = f["channel0001"][: MAX_SAMPLES].astype(np.float32)
-        ch2 = f["channel0002"][: MAX_SAMPLES].astype(np.float32)
-    # Ensure equal length
+        try:
+            ch1 = f["timeseries"]["channel0001"]["timeseries"][: MAX_SAMPLES].astype(np.float32)
+            ch2 = f["timeseries"]["channel0002"]["timeseries"][: MAX_SAMPLES].astype(np.float32)
+        except KeyError:
+            ch1 = f["channel0001"][: MAX_SAMPLES].astype(np.float32)
+            ch2 = f["channel0002"][: MAX_SAMPLES].astype(np.float32)
+    ch1 += 128.0   # shift signed ADC → unsigned [0, 255], matching reference
+    ch2 += 128.0
     n = min(len(ch1), len(ch2))
     return ch1[:n], ch2[:n]
 
@@ -93,17 +104,12 @@ class TIDMADWindowDataset(Dataset):
         s = self.starts[idx]
         e = s + self.window_size
 
-        x = self.ch1[s:e].clone()   # noisy input
-        y = self.ch2[s:e].clone()   # clean target
+        x = self.ch1[s:e].clone()   # noisy input  (values in [0, 255])
+        y = self.ch2[s:e].clone()   # clean target (values in [0, 255])
 
-        # Per-window standardisation using the noisy input's statistics.
-        # Both channels are normalised by the same mean/std so the clean signal
-        # retains its natural amplitude relative to the noise — the model learns
-        # a standard denoiser rather than an amplitude-amplifying estimator.
-        x_mean, x_std = x.mean(), x.std().clamp(min=1e-8)
-
-        x = (x - x_mean) / x_std
-        y = (y - x_mean) / x_std
+        # No per-window normalisation — following the reference (jessicafry/TIDMAD
+        # train.py) which uses raw ADC values shifted to [0, 255] without any
+        # further centering or scaling.
 
         # Shape: (1, window_size) – single-channel 1-D signal
         return x.unsqueeze(0), y.unsqueeze(0)

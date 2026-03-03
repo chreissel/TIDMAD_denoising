@@ -27,12 +27,20 @@ N_SAMPLES = 20_000   # small enough to be fast in CI
 
 
 def _make_h5(path: str, n_samples: int = N_SAMPLES, seed: int = 0) -> None:
+    """Create a synthetic HDF5 file matching the reference jessicafry/TIDMAD layout.
+
+    Structure: timeseries/channel000X/timeseries  (nested, as in array2h5.py)
+    Values: signed int8 range [-128, 127] stored as float32, matching raw ADC output.
+    """
     rng = np.random.default_rng(seed)
-    ch1 = rng.standard_normal(n_samples).astype(np.float32)
-    ch2 = rng.standard_normal(n_samples).astype(np.float32)
+    ch1 = rng.integers(-128, 128, n_samples).astype(np.float32)
+    ch2 = rng.integers(-128, 128, n_samples).astype(np.float32)
     with h5py.File(path, "w") as f:
-        f.create_dataset("channel0001", data=ch1)
-        f.create_dataset("channel0002", data=ch2)
+        ts = f.create_group("timeseries")
+        g1 = ts.create_group("channel0001")
+        g1.create_dataset("timeseries", data=ch1)
+        g2 = ts.create_group("channel0002")
+        g2.create_dataset("timeseries", data=ch2)
 
 
 @pytest.fixture
@@ -84,20 +92,14 @@ class TestTIDMADWindowDataset:
         assert x.dtype == torch.float32
         assert y.dtype == torch.float32
 
-    def test_normalisation_zero_mean(self, h5_file):
+    def test_values_in_unsigned_adc_range(self, h5_file):
+        """After +128 shift, values must be in [0, 255] (unsigned ADC range)."""
         ds = TIDMADWindowDataset(h5_file, window_size=512)
         x, y = ds[0]
-        # x is normalised by its own mean/std → always zero-mean
-        assert x.mean().abs().item() < 1e-5, "x should be zero-mean after normalisation"
-        # y is normalised by x's statistics (shared reference frame), so its
-        # mean equals (y_mean - x_mean) / x_std which is generally non-zero.
-
-    def test_normalisation_unit_std(self, h5_file):
-        ds = TIDMADWindowDataset(h5_file, window_size=512)
-        x, y = ds[0]
-        # x is unit-std by construction
-        assert abs(x.std().item() - 1.0) < 0.1
-        # y uses x's std, so y.std() ≈ signal_std / noise_std (< 1 in practice)
+        assert x.min().item() >= 0.0,   f"x min {x.min():.1f} < 0"
+        assert x.max().item() <= 255.0, f"x max {x.max():.1f} > 255"
+        assert y.min().item() >= 0.0,   f"y min {y.min():.1f} < 0"
+        assert y.max().item() <= 255.0, f"y max {y.max():.1f} > 255"
 
     def test_different_windows_not_identical(self, h5_file):
         ds = TIDMADWindowDataset(h5_file, window_size=512)
