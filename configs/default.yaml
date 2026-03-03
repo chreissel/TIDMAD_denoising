@@ -31,7 +31,7 @@ model:
 training:
   max_epochs: 100
   lr: 5.0e-4
-  sample_rate: 1.0e7         # TIDMAD sample rate in Hz (10 MHz)
+  sample_rate: 10000000         # TIDMAD sample rate in Hz (10 MHz)
   gradient_clip_val: 1.0
   accumulate_grad_batches: 2 # effective batch = 16*2 = 32, same as before
 
