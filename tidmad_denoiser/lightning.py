@@ -18,7 +18,6 @@ import pytorch_lightning as pl
 from tidmad_denoiser.model import AttentionAutoencoder, build_model
 from tidmad_denoiser.metrics import compute_all_metrics
 
-
 class DenoisingModule(pl.LightningModule):
     """
     LightningModule wrapping the AttentionAutoencoder denoiser.
