@@ -60,6 +60,7 @@ def main() -> None:
         model_cfg=cfg["model"],
         lr=cfg["training"]["lr"],
         sample_rate=cfg["training"]["sample_rate"],
+        spectral_weight=cfg["training"].get("spectral_weight", 0.3),
     )
 
     # ------------------------------------------------------------------ #

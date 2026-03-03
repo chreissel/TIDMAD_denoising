@@ -96,12 +96,14 @@ class TIDMADWindowDataset(Dataset):
         x = self.ch1[s:e].clone()   # noisy input
         y = self.ch2[s:e].clone()   # clean target
 
-        # Per-window standardisation (zero-mean, unit-std)
+        # Per-window standardisation using the noisy input's statistics.
+        # Both channels are normalised by the same mean/std so the clean signal
+        # retains its natural amplitude relative to the noise — the model learns
+        # a standard denoiser rather than an amplitude-amplifying estimator.
         x_mean, x_std = x.mean(), x.std().clamp(min=1e-8)
-        y_mean, y_std = y.mean(), y.std().clamp(min=1e-8)
 
         x = (x - x_mean) / x_std
-        y = (y - y_mean) / y_std
+        y = (y - x_mean) / x_std
 
         # Shape: (1, window_size) – single-channel 1-D signal
         return x.unsqueeze(0), y.unsqueeze(0)

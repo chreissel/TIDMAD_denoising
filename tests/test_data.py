@@ -87,14 +87,17 @@ class TestTIDMADWindowDataset:
     def test_normalisation_zero_mean(self, h5_file):
         ds = TIDMADWindowDataset(h5_file, window_size=512)
         x, y = ds[0]
+        # x is normalised by its own mean/std → always zero-mean
         assert x.mean().abs().item() < 1e-5, "x should be zero-mean after normalisation"
-        assert y.mean().abs().item() < 1e-5, "y should be zero-mean after normalisation"
+        # y is normalised by x's statistics (shared reference frame), so its
+        # mean equals (y_mean - x_mean) / x_std which is generally non-zero.
 
     def test_normalisation_unit_std(self, h5_file):
         ds = TIDMADWindowDataset(h5_file, window_size=512)
         x, y = ds[0]
+        # x is unit-std by construction
         assert abs(x.std().item() - 1.0) < 0.1
-        assert abs(y.std().item() - 1.0) < 0.1
+        # y uses x's std, so y.std() ≈ signal_std / noise_std (< 1 in practice)
 
     def test_different_windows_not_identical(self, h5_file):
         ds = TIDMADWindowDataset(h5_file, window_size=512)
