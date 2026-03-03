@@ -14,7 +14,7 @@ from typing import Any, Dict, Optional, Tuple
 
 import torch
 import torch.nn.functional as F
-import pytorch_lightning as pl
+from tidmad_denoiser._compat import pl
 
 from tidmad_denoiser.model import AttentionAutoencoder, build_model
 from tidmad_denoiser.metrics import compute_all_metrics

@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import argparse
 
-import pytorch_lightning as pl
+from tidmad_denoiser._compat import pl
 import yaml
 
 from tidmad_denoiser.data import TIDMADDataModule

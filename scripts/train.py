@@ -14,13 +14,13 @@ import argparse
 import os
 
 import yaml
-import pytorch_lightning as pl
-from pytorch_lightning.callbacks import (
+from tidmad_denoiser._compat import (
+    pl,
     ModelCheckpoint,
     EarlyStopping,
     RichProgressBar,
+    TensorBoardLogger,
 )
-from pytorch_lightning.loggers import TensorBoardLogger
 
 from tidmad_denoiser.data import TIDMADDataModule
 from tidmad_denoiser.lightning import DenoisingModule
