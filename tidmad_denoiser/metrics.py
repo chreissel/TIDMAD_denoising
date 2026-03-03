@@ -105,7 +105,10 @@ def _get_psd(x: Tensor, sample_rate: float) -> Tensor:
     Matches the reference:  dt/N * |rfft(ts)|^2  (no windowing, DC dropped).
     """
     N = x.shape[-1]
-    dt = 1.0 / sample_rate
+    dt = 1.0 / float(sample_rate)
+    # Cast to float32: cuFFT only supports power-of-2 sizes for float16 (AMP),
+    # and arbitrary window sizes must be processed in float32.
+    x = x.float()
     fft = torch.fft.rfft(x, dim=-1)
     psd = (fft.abs() ** 2) * (dt / N)
     # Drop DC bin (index 0) — reference uses freq_array starting at the first non-DC bin
